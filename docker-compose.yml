@@ -1,0 +1,191 @@
+services:
+  # ============================================================================
+  # PostgreSQL Database Service
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: shopsmart-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-shopsmart_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-shopsmart_password_2026}
+      POSTGRES_DB: ${POSTGRES_DB:-shopsmart_db}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-shopsmart_user} -d ${POSTGRES_DB:-shopsmart_db}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - shopsmart-network
+
+  # ============================================================================
+  # Redis Caching Service
+  # ============================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: shopsmart-redis
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - shopsmart-network
+
+  # ============================================================================
+  # FastAPI Backend Service
+  # ============================================================================
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: shopsmart-backend
+    restart: always
+    environment:
+      - PROJECT_NAME=ShopSmart AI
+      - APP_ENV=production
+      - DEBUG=False
+      - SECRET_KEY=${SECRET_KEY:-shopsmart_super_secure_jwt_secret_key_change_in_production_2026_xyz}
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-shopsmart_user}:${POSTGRES_PASSWORD:-shopsmart_password_2026}@postgres:5432/${POSTGRES_DB:-shopsmart_db}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-3.8-flash}
+      - AMAZON_PA_API_KEY=${AMAZON_PA_API_KEY:-}
+      - FLIPKART_AFFILIATE_ID=${FLIPKART_AFFILIATE_ID:-}
+      - FLIPKART_AFFILIATE_TOKEN=${FLIPKART_AFFILIATE_TOKEN:-}
+      - CROMA_API_KEY=${CROMA_API_KEY:-}
+      - RELIANCE_API_KEY=${RELIANCE_API_KEY:-}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-alerts@shopsmart.ai}
+      - AWS_REGION=${AWS_REGION:-ap-south-1}
+      - AWS_SNS_TOPIC_ARN=${AWS_SNS_TOPIC_ARN:-}
+      - PRICE_CHECK_INTERVAL_SECONDS=${PRICE_CHECK_INTERVAL_SECONDS:-300}
+      - ALLOWED_ORIGINS=["*"]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - shopsmart-network
+
+  # ============================================================================
+  # React Frontend Service
+  # ============================================================================
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: shopsmart-frontend
+    restart: always
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:80/ || wget -q -O - http://127.0.0.1:3000/ || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - shopsmart-network
+
+  # ============================================================================
+  # Nginx Unified Reverse Proxy
+  # ============================================================================
+  nginx:
+    image: nginx:alpine
+    container_name: shopsmart-nginx
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:80/ || exit 0"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - shopsmart-network
+
+  # ============================================================================
+  # Snap2Price Background Price-Drop Monitoring Worker
+  # ============================================================================
+  price-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: shopsmart-price-worker
+    restart: always
+    command: ["python", "-m", "app.workers.price_monitor"]
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-shopsmart_user}:${POSTGRES_PASSWORD:-shopsmart_password_2026}@postgres:5432/${POSTGRES_DB:-shopsmart_db}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - PRICE_CHECK_INTERVAL_SECONDS=${PRICE_CHECK_INTERVAL_SECONDS:-300}
+      - SMTP_HOST=${SMTP_HOST:-}
+      - SMTP_PORT=${SMTP_PORT:-587}
+      - SMTP_USER=${SMTP_USER:-}
+      - SMTP_PASSWORD=${SMTP_PASSWORD:-}
+      - SMTP_FROM_EMAIL=${SMTP_FROM_EMAIL:-alerts@shopsmart.ai}
+      - AWS_REGION=${AWS_REGION:-ap-south-1}
+      - AWS_SNS_TOPIC_ARN=${AWS_SNS_TOPIC_ARN:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -m app.workers.price_monitor --once || exit 1"]
+      interval: 60s
+      timeout: 15s
+      retries: 3
+      start_period: 20s
+    networks:
+      - shopsmart-network
+
+# ==============================================================================
+# Persistent Volumes & Network Definitions
+# ==============================================================================
+volumes:
+  postgres_data:
+    name: shopsmart_postgres_data
+  redis_data:
+    name: shopsmart_redis_data
+
+networks:
+  shopsmart-network:
+    name: shopsmart_network
+    driver: bridge

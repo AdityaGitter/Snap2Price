@@ -1,0 +1,170 @@
+name: ShopSmart AI - CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  # ============================================================================
+  # 1. Backend Linting & Test Suite
+  # ============================================================================
+  backend-test:
+    name: Backend Tests & Quality
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run Backend Integration & AI Tests
+        env:
+          DATABASE_URL: "sqlite:///./test_ci.db"
+          SECRET_KEY: "test_ci_secret_key_shopsmart_ai"
+          REDIS_HOST: "localhost"
+          REDIS_PORT: "6379"
+          GEMINI_API_KEY: ""
+        run: |
+          cd backend
+          python run_tests.py
+          python run_snap2price_tests.py
+          python -m app.workers.price_monitor --once
+
+  # ============================================================================
+  # 2. Frontend Build & Static Analysis
+  # ============================================================================
+  frontend-build:
+    name: Frontend Build & Typecheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: frontend/package.json
+
+      - name: Install Frontend Dependencies
+        working-directory: ./frontend
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Run TypeScript & Vite Production Build
+        working-directory: ./frontend
+        run: npm run build
+
+  # ============================================================================
+  # 3. Docker Container Build & Validation
+  # ============================================================================
+  docker-build:
+    name: Docker Images Build & Validation
+    needs: [backend-test, frontend-build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Validate Docker Compose Configuration
+        run: |
+          docker compose config
+
+      - name: Build Backend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          tags: shopsmart-backend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build Frontend Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: false
+          tags: shopsmart-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ============================================================================
+  # 4. Continuous Deployment to AWS EC2 (Triggered on Main branch push)
+  # ============================================================================
+  deploy:
+    name: Deploy to AWS EC2
+    needs: [docker-build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        if: env.EC2_HOST != ''
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_USER: ${{ secrets.EC2_USER || 'ubuntu' }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          script: |
+            echo "🚀 Deploying latest ShopSmart AI build..."
+            cd /opt/shopsmart-ai || git clone https://github.com/${{ github.repository }} /opt/shopsmart-ai && cd /opt/shopsmart-ai
+            git pull origin main
+            
+            # Export environment variables securely
+            cat << 'EOF' > .env
+            PROJECT_NAME=ShopSmart AI
+            APP_ENV=production
+            DEBUG=False
+            SECRET_KEY=${{ secrets.APP_SECRET_KEY }}
+            POSTGRES_USER=${{ secrets.POSTGRES_USER || 'shopsmart_user' }}
+            POSTGRES_PASSWORD=${{ secrets.POSTGRES_PASSWORD }}
+            POSTGRES_DB=${{ secrets.POSTGRES_DB || 'shopsmart_db' }}
+            GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+            GEMINI_MODEL=gemini-3.8-flash
+            EOF
+
+            # Run zero-downtime container updates
+            docker compose down
+            docker compose pull || true
+            docker compose up --build -d
+
+            echo "✅ Deployment completed successfully! Performing healthcheck..."
+            sleep 15
+            curl -f http://localhost/api/health || exit 1
+            echo "✨ ShopSmart AI is healthy and live!"

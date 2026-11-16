@@ -1,0 +1,27 @@
+# ==============================================================================
+# ShopSmart AI – Terraform Variables Example File
+# Rename this file to 'terraform.tfvars' and customize your values.
+# DO NOT COMMIT your private credentials or real SSH key file to Git.
+# ==============================================================================
+
+# AWS Region where resources will be provisioned
+aws_region = "ap-south-1"
+
+# Environment tag
+environment = "production"
+
+# Instance sizing:
+# - t2.micro / t3.micro: Eligible for AWS Free Tier (1 GB RAM - requires swap space for Docker builds)
+# - t3.small: Recommended budget demo choice (2 GB RAM, ~\$0.02/hr)
+# - t3.medium: High performance production choice (4 GB RAM, 2 vCPUs)
+instance_type = "t3.small"
+
+# AWS SSH Key Pair Name (must exist in your AWS account in the chosen region)
+key_name = "my-aws-ec2-key"
+
+# Restrict SSH access to your specific IP address for security (e.g. "203.0.113.25/32")
+# Default "0.0.0.0/0" allows access from any IP address
+allowed_ssh_cidr = "0.0.0.0/0"
+
+# Root volume storage in GB
+ebs_volume_size = 30
